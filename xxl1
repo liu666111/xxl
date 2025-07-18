@@ -1,0 +1,1117 @@
+#include <graphics.h>
+#include <conio.h>
+#include <vector>
+#include <algorithm>
+#include <ctime>
+#include <queue>
+#include <cmath>
+#include <fstream>
+#include <windows.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
+
+using namespace std;
+
+// 游戏常量
+const int WIDTH = 800;
+const int HEIGHT = 900;
+const int GRID_SIZE = 10;
+const int CELL_SIZE = 60;
+const int MARGIN_TOP = 120;
+const int ANIMATION_STEPS = 10;
+const int MAX_LEVEL = 5;
+const int MAX_COMBO = 10;
+
+// 游戏状态枚举
+enum GameState {
+    MENU,
+    PLAYING,
+    PAUSED,
+    GAME_OVER,
+    LEVEL_COMPLETE,
+    TUTORIAL
+};
+
+// 方块类
+class Block {
+private:
+    int color; // 方块颜色
+    int specialType; // 0=普通, 1=爆炸, 2=整行消除, 3=整列消除, 4=彩虹
+
+public:
+    Block() : color(0), specialType(0) {}
+    Block(int c, int s) : color(c), specialType(s) {}
+
+    int getColor() const { return color; }
+    void setColor(int c) { color = c; }
+
+    int getSpecialType() const { return specialType; }
+    void setSpecialType(int s) { specialType = s; }
+};
+
+// 粒子类
+class Particle {
+private:
+    int x, y;
+    COLORREF color;
+    int life;
+    int vx, vy;
+    int size;
+    int alpha;
+
+public:
+    Particle(int x, int y, COLORREF c, int l, int vx, int vy, int s, int a)
+        : x(x), y(y), color(c), life(l), vx(vx), vy(vy), size(s), alpha(a) {}
+
+    void update() {
+        x += vx;
+        y += vy;
+        vy += 1;
+        life--;
+        alpha -= 5;
+    }
+
+    bool isAlive() const { return life > 0 && alpha > 0; }
+
+    void draw() const {
+        setfillcolor(COLORREF((alpha << 24) | (GetBValue(color) << 16) | (GetGValue(color) << 8) | GetRValue(color)));
+        solidcircle(x, y, size);
+    }
+
+    int getX() const { return x; }
+    int getY() const { return y; }
+};
+
+// 得分动画类
+class ScorePopup {
+private:
+    int x, y;
+    int value;
+    int life;
+
+public:
+    ScorePopup(int x, int y, int v, int l) : x(x), y(y), value(v), life(l) {}
+
+    void update() {
+        y -= 1;
+        life--;
+    }
+
+    bool isAlive() const { return life > 0; }
+
+    void draw() const {
+        setbkmode(TRANSPARENT);
+        settextcolor(RGB(255, 215, 0));
+        settextstyle(24, 0, _T("微软雅黑"));
+        TCHAR scoreText[20];
+        _stprintf_s(scoreText, _T("+%d"), value);
+        outtextxy(x, y, scoreText);
+        setbkmode(OPAQUE);
+    }
+};
+
+// 颜色数组
+COLORREF COLORS[] = {
+    RGB(255, 0, 0),     // 红色
+    RGB(0, 180, 0),     // 深绿色
+    RGB(0, 0, 255),     // 蓝色
+    RGB(255, 255, 0),   // 黄色
+    RGB(180, 0, 180),   // 深紫色
+    RGB(0, 200, 200),   // 青色
+    RGB(255, 128, 0),   // 橙色
+    RGB(128, 0, 255)    // 深紫色
+};
+const int COLOR_COUNT = 8;
+
+// 游戏状态变量
+GameState gameState = MENU;
+vector<vector<Block>> grid(GRID_SIZE, vector<Block>(GRID_SIZE));
+vector<Particle> particles;
+vector<ScorePopup> scorePopups;
+int score = 0;
+int movesLeft = 0;
+int currentLevel = 1;
+int comboCount = 0;
+int comboMultiplier = 1;
+bool isSelecting = false;
+bool isAnimating = false;
+int selectedRow = -1, selectedCol = -1;
+int animationStep = 0;
+int swapFromRow = -1, swapFromCol = -1;
+int swapToRow = -1, swapToCol = -1;
+bool isInvalidSwap = false; // 标记是否为无效交换
+bool hasSavedGame = false; // 是否有存档
+
+// 关卡配置类
+class LevelConfig {
+private:
+    int targetScore;
+    int initialMoves;
+    int colorCount;
+    float specialChance;
+
+public:
+    LevelConfig(int ts, int im, int cc, float sc)
+        : targetScore(ts), initialMoves(im), colorCount(cc), specialChance(sc) {}
+
+    int getTargetScore() const { return targetScore; }
+    int getInitialMoves() const { return initialMoves; }
+    int getColorCount() const { return colorCount; }
+    float getSpecialChance() const { return specialChance; }
+};
+
+vector<LevelConfig> levels = {
+    LevelConfig(1500, 25, 4, 0.1f),   // 第1关
+    LevelConfig(2400, 20, 5, 0.15f),  // 第2关
+    LevelConfig(3600, 18, 6, 0.2f),   // 第3关
+    LevelConfig(4500, 15, 7, 0.25f),  // 第4关
+    LevelConfig(6000, 12, 8, 0.3f)    // 第5关
+};
+
+// 函数声明
+bool hasMatches();
+void initGrid();
+void createParticles(int row, int col, COLORREF color);
+void updateParticles();
+void drawParticles();
+void drawGame();
+void drawMenu();
+void drawPauseMenu();
+void drawLevelComplete();
+bool isAdjacent(int r1, int c1, int r2, int c2);
+void swapBlocksWithAnimation(int r1, int c1, int r2, int c2);
+vector<vector<bool>> findMatches();
+void removeMatches();
+void handleClick(int x, int y);
+void handleMenuInput(int key);
+void handlePauseInput(int key);
+void startLevel(int level);
+void checkLevelCompletion();
+void updateScorePopups();
+void drawScorePopups();
+void drawBlock(int x, int y, const Block& block);
+void drawTutorial();
+void saveGame();
+void loadGame();
+void drawGradientBackground();
+void playBackgroundMusic();
+void stopBackgroundMusic();
+
+
+// 播放背景音乐
+void playBackgroundMusic() {
+    // 替换为你的音乐文件路径
+    const TCHAR* musicPath = _T("D:\\正式学习\\c++\\Project1\\x64\\Debug\\M500004fneUm24gD2c (1).mp3");
+
+    // 打开音乐文件
+    TCHAR cmd[256];
+    _stprintf_s(cmd, _T("open \"%s\" alias bgmusic"), musicPath);
+    mciSendString(cmd, NULL, 0, NULL);
+
+    // 设置循环播放
+    mciSendString(_T("play bgmusic repeat"), NULL, 0, NULL);
+}
+
+// 停止背景音乐
+void stopBackgroundMusic() {
+    mciSendString(_T("stop bgmusic"), NULL, 0, NULL);
+    mciSendString(_T("close bgmusic"), NULL, 0, NULL);
+}
+// 绘制渐变背景
+void drawGradientBackground() {
+    for (int i = 0; i < HEIGHT; i++) {
+        int r = 255 - i * 255 / HEIGHT;
+        int g = 200 - i * 200 / HEIGHT;
+        int b = 150 + i * 105 / HEIGHT;
+        setlinecolor(RGB(r, g, b));
+        line(0, i, WIDTH, i);
+    }
+}
+
+// 图片资源
+IMAGE titleImage;       // 标题图片
+IMAGE blockImages[COLOR_COUNT];  // 普通方块图片
+
+// 加载图片资源
+void loadImages() {
+    static bool firstTime = true;
+    if (firstTime) {
+        // 加载普通方块图片路径
+        for (int i = 0; i < COLOR_COUNT; i++) {
+            TCHAR filename[50];
+            _stprintf_s(filename, _T("D:\\正式学习\\c++\\Project1\\x64\\Debug\\picture\\%d.jpg"), i + 1);
+            loadimage(&blockImages[i], filename, CELL_SIZE, CELL_SIZE);
+        }
+        firstTime = false;
+    }
+}
+
+// 初始化游戏网格
+void initGrid() {
+    static bool firstTime = true;
+    if (firstTime) {
+        loadImages();
+        firstTime = false;
+    }
+
+    srand((unsigned)time(NULL));
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE; ++j) {
+            grid[i][j].setColor(rand() % levels[currentLevel - 1].getColorCount());
+            if (rand() / (float)RAND_MAX < levels[currentLevel - 1].getSpecialChance()) {
+                grid[i][j].setSpecialType(1 + rand() % 4);
+            }
+            else {
+                grid[i][j].setSpecialType(0);
+            }
+        }
+    }
+
+    while (hasMatches()) {
+        for (int i = 0; i < GRID_SIZE; ++i) {
+            for (int j = 0; j < GRID_SIZE; ++j) {
+                grid[i][j].setColor(rand() % levels[currentLevel - 1].getColorCount());
+            }
+        }
+    }
+}
+
+// 创建粒子效果
+void createParticles(int row, int col, COLORREF color) {
+    for (int i = 0; i < 20; ++i) {
+        int x = col * CELL_SIZE + (WIDTH - GRID_SIZE * CELL_SIZE) / 2 + CELL_SIZE / 2;
+        int y = row * CELL_SIZE + MARGIN_TOP + CELL_SIZE / 2;
+        int life = 20 + rand() % 30;
+        int vx = -5 + rand() % 10;
+        int vy = -10 + rand() % 5;
+        int size = 2 + rand() % 4;
+        int alpha = 200 + rand() % 55;
+
+        particles.emplace_back(x, y, color, life, vx, vy, size, alpha);
+    }
+}
+
+// 更新粒子效果
+void updateParticles() {
+    for (auto it = particles.begin(); it != particles.end(); ) {
+        it->update();
+        if (!it->isAlive()) {
+            it = particles.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+}
+
+// 更新得分动画
+void updateScorePopups() {
+    for (auto it = scorePopups.begin(); it != scorePopups.end(); ) {
+        it->update();
+        if (!it->isAlive()) {
+            it = scorePopups.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+}
+
+// 绘制粒子效果
+void drawParticles() {
+    for (const auto& p : particles) {
+        p.draw();
+    }
+}
+
+// 绘制得分动画
+void drawScorePopups() {
+    for (const auto& popup : scorePopups) {
+        popup.draw();
+    }
+}
+
+// 绘制方块
+void drawBlock(int x, int y, const Block& block) {
+    // 绘制基础图片
+    putimage(x, y, &blockImages[block.getColor()]);
+
+    // 特殊方块特效 - 替代原有特殊图片
+    if (block.getSpecialType() > 0) {
+        // 获取当前时间用于动画效果
+        static int frameCount = 0;
+        frameCount++;
+
+        // 根据特殊类型绘制不同特效
+        switch (block.getSpecialType()) {
+        case 1: // 爆炸方块：红色闪烁边框 + 爆炸符号
+            setlinecolor(frameCount % 10 < 5 ? RGB(255, 0, 0) : RGB(255, 100, 100));
+            setlinestyle(PS_SOLID, 4);
+            rectangle(x + 2, y + 2, x + CELL_SIZE - 2, y + CELL_SIZE - 2);
+
+            // 绘制爆炸符号 "*"
+            settextcolor(RGB(255, 0, 0));
+            settextstyle(30, 0, _T("微软雅黑"));
+            setbkmode(TRANSPARENT);
+            outtextxy(x + 15, y + 15, _T("*"));
+            setbkmode(OPAQUE);
+            break;
+
+        case 2: // 整行消除：蓝色水平线条 + 横线符号
+            setlinecolor(RGB(0, 0, 255));
+            setlinestyle(PS_DASH | PS_ENDCAP_ROUND, 3);
+            line(x + 5, y + CELL_SIZE / 2, x + CELL_SIZE - 5, y + CELL_SIZE / 2);
+
+            // 绘制横线符号 "—"
+            settextcolor(RGB(0, 0, 255));
+            settextstyle(30, 0, _T("微软雅黑"));
+            setbkmode(TRANSPARENT);
+            outtextxy(x + 15, y + 15, _T("—"));
+            setbkmode(OPAQUE);
+            break;
+
+        case 3: // 整列消除：绿色垂直线条 + 竖线符号
+            setlinecolor(RGB(0, 200, 0));
+            setlinestyle(PS_DASH | PS_ENDCAP_ROUND, 3);
+            line(x + CELL_SIZE / 2, y + 5, x + CELL_SIZE / 2, y + CELL_SIZE - 5);
+
+            // 绘制竖线符号 "|"
+            settextcolor(RGB(0, 200, 0));
+            settextstyle(30, 0, _T("微软雅黑"));
+            setbkmode(TRANSPARENT);
+            outtextxy(x + 20, y + 10, _T("|"));
+            setbkmode(OPAQUE);
+            break;
+
+        case 4: // 彩虹方块：彩色旋转边框 + 星号符号
+            // 彩虹边框效果（使用不同颜色的多层边框）
+            COLORREF rainbowColors[] = {
+                RGB(255,0,0), RGB(255,127,0), RGB(255,255,0),
+                RGB(0,255,0), RGB(0,0,255), RGB(75,0,130)
+            };
+            for (int i = 0; i < 6; i++) {
+                setlinecolor(rainbowColors[(i + frameCount / 5) % 6]);
+                setlinestyle(PS_SOLID, 2);
+                rectangle(x + 2 + i, y + 2 + i,
+                    x + CELL_SIZE - 2 - i, y + CELL_SIZE - 2 - i);
+            }
+
+            // 绘制星号符号 "★"
+            settextcolor(RGB(255, 215, 0));
+            settextstyle(25, 0, _T("微软雅黑"));
+            setbkmode(TRANSPARENT);
+            outtextxy(x + 12, y + 15, _T("★"));
+            setbkmode(OPAQUE);
+            break;
+        }
+        setlinestyle(PS_SOLID, 1); // 重置线条样式
+    }
+
+    // 边框
+    setlinecolor(RGB(80, 80, 80));
+    rectangle(x, y, x + CELL_SIZE, y + CELL_SIZE);
+
+    // 选中效果
+    if (isSelecting && &block == &grid[selectedRow][selectedCol]) {
+        setlinecolor(RGB(255, 255, 0));
+        setlinestyle(PS_SOLID, 3);
+        rectangle(x + 2, y + 2, x + CELL_SIZE - 2, y + CELL_SIZE - 2);
+        setlinestyle(PS_SOLID, 1);
+    }
+}
+
+// 检查是否有可消除的方块
+bool hasMatches() {
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE - 2; ++j) {
+            if (grid[i][j].getColor() == grid[i][j + 1].getColor() &&
+                grid[i][j].getColor() == grid[i][j + 2].getColor()) {
+                return true;
+            }
+        }
+    }
+
+    for (int j = 0; j < GRID_SIZE; ++j) {
+        for (int i = 0; i < GRID_SIZE - 2; ++i) {
+            if (grid[i][j].getColor() == grid[i + 1][j].getColor() &&
+                grid[i][j].getColor() == grid[i + 2][j].getColor()) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// 绘制开始菜单
+void drawMenu() {
+    // 背景渐变 - 更丰富的颜色过渡
+    drawGradientBackground();
+
+    // 标题 - 添加阴影效果
+    settextstyle(60, 0, _T("微软雅黑"));
+    setbkmode(TRANSPARENT);
+
+    // 阴影
+    settextcolor(RGB(100, 100, 100));
+    outtextxy(WIDTH / 2 - 148, HEIGHT / 4 + 3, _T("开心消消乐"));
+
+    // 主标题
+    settextcolor(RGB(255, 80, 80));
+    outtextxy(WIDTH / 2 - 150, HEIGHT / 4, _T("开心消消乐"));
+
+    // 副标题
+    settextstyle(24, 0, _T("微软雅黑"));
+    settextcolor(RGB(255, 255, 255));
+    outtextxy(WIDTH / 2 - 100, HEIGHT / 4 + 70, _T("经典消除游戏"));
+
+    // 菜单选项 - 使用更精美的按钮样式
+    settextstyle(32, 0, _T("微软雅黑"));
+
+    // 开始游戏按钮
+    setfillcolor(RGB(100, 200, 100));
+    fillroundrect(WIDTH / 2 - 150, HEIGHT / 2 - 25, WIDTH / 2 + 150, HEIGHT / 2 + 25, 15, 15);
+    settextcolor(RGB(255, 255, 255));
+    outtextxy(WIDTH / 2 - 50, HEIGHT / 2 - 15, _T("开始游戏"));
+
+    // 继续游戏按钮 (如果有存档)
+    if (hasSavedGame) {
+        setfillcolor(RGB(100, 150, 200));
+    }
+    else {
+        setfillcolor(RGB(150, 150, 150));
+    }
+    fillroundrect(WIDTH / 2 - 150, HEIGHT / 2 + 40, WIDTH / 2 + 150, HEIGHT / 2 + 90, 15, 15);
+    settextcolor(RGB(255, 255, 255));
+    outtextxy(WIDTH / 2 - 50, HEIGHT / 2 + 50, _T("继续游戏"));
+
+    // 游戏教程按钮
+    setfillcolor(RGB(200, 150, 100));
+    fillroundrect(WIDTH / 2 - 150, HEIGHT / 2 + 105, WIDTH / 2 + 150, HEIGHT / 2 + 155, 15, 15);
+    settextcolor(RGB(255, 255, 255));
+    outtextxy(WIDTH / 2 - 50, HEIGHT / 2 + 115, _T("游戏教程"));
+
+    // 退出游戏按钮
+    setfillcolor(RGB(200, 100, 100));
+    fillroundrect(WIDTH / 2 - 150, HEIGHT / 2 + 170, WIDTH / 2 + 150, HEIGHT / 2 + 220, 15, 15);
+    settextcolor(RGB(255, 255, 255));
+    outtextxy(WIDTH / 2 - 50, HEIGHT / 2 + 180, _T("退出游戏"));
+
+    setbkmode(OPAQUE);
+}
+
+// 绘制教程界面（修改：使用渐变背景）
+void drawTutorial() {
+    // 绘制与主菜单一致的渐变背景
+    drawGradientBackground();
+
+    // 标题
+    settextcolor(RGB(255, 255, 0));
+    settextstyle(48, 0, _T("微软雅黑"));
+    setbkmode(TRANSPARENT);
+    outtextxy(WIDTH / 2 - 80, 80, _T("游戏教程"));
+
+    // 教程内容
+    settextstyle(24, 0, _T("微软雅黑"));
+    settextcolor(WHITE);
+
+    int startY = 180;          // 提高起始Y坐标
+    int lineHeight = 45;       // 增加行高，避免文字重叠
+
+    outtextxy(100, startY, _T("1. 点击相邻的两个方块可以交换它们的位置"));
+    outtextxy(100, startY + lineHeight, _T("2. 三个或更多相同方块连成一线即可消除"));
+    outtextxy(100, startY + lineHeight * 2, _T("3. 特殊方块有额外消除效果:"));
+    outtextxy(150, startY + lineHeight * 3, _T("- 爆炸方块: 消除周围8个方块 (带*标记)"));
+    outtextxy(150, startY + lineHeight * 4, _T("- 行消除: 消除整行方块 (带—标记)"));
+    outtextxy(150, startY + lineHeight * 5, _T("- 列消除: 消除整列方块 (带|标记)"));
+    outtextxy(150, startY + lineHeight * 6, _T("- 彩虹方块: 消除所有同色方块 (带★标记)"));
+    outtextxy(100, startY + lineHeight * 7, _T("4. 在限定步数内达到目标分数即可过关"));
+    outtextxy(100, startY + lineHeight * 8, _T("5. 连击可以获得分数加成"));
+
+    // 返回按钮
+    setfillcolor(RGB(200, 100, 100));
+    fillroundrect(WIDTH / 2 - 100, HEIGHT - 120, WIDTH / 2 + 100, HEIGHT - 70, 15, 15);
+    settextcolor(WHITE);
+    outtextxy(WIDTH / 2 - 40, HEIGHT - 105, _T("返回"));
+
+    setbkmode(OPAQUE);
+}
+
+// 保存游戏
+void saveGame() {
+    ofstream out("savedata.dat", ios::binary);
+    if (out) {
+        out.write((char*)&currentLevel, sizeof(currentLevel));
+        out.write((char*)&score, sizeof(score));
+        out.write((char*)&movesLeft, sizeof(movesLeft));
+        out.close();
+        hasSavedGame = true;
+    }
+}
+
+// 加载游戏
+void loadGame() {
+    ifstream in("savedata.dat", ios::binary);
+    if (in) {
+        in.read((char*)&currentLevel, sizeof(currentLevel));
+        in.read((char*)&score, sizeof(score));
+        in.read((char*)&movesLeft, sizeof(movesLeft));
+        in.close();
+        startLevel(currentLevel);
+    }
+}
+
+// 检查相邻方块
+bool isAdjacent(int r1, int c1, int r2, int c2) {
+    return (abs(r1 - r2) == 1 && c1 == c2) || (abs(c1 - c2) == 1 && r1 == r2);
+}
+
+// 带动画的方块交换
+void swapBlocksWithAnimation(int r1, int c1, int r2, int c2) {
+    swapFromRow = r1;
+    swapFromCol = c1;
+    swapToRow = r2;
+    swapToCol = c2;
+    isAnimating = true;
+    animationStep = 0;
+    isInvalidSwap = false;
+}
+
+// 查找匹配的方块
+vector<vector<bool>> findMatches() {
+    vector<vector<bool>> toRemove(GRID_SIZE, vector<bool>(GRID_SIZE, false));
+
+    // 水平匹配
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE - 2; ++j) {
+            if (grid[i][j].getColor() == grid[i][j + 1].getColor() &&
+                grid[i][j].getColor() == grid[i][j + 2].getColor()) {
+                toRemove[i][j] = toRemove[i][j + 1] = toRemove[i][j + 2] = true;
+            }
+        }
+    }
+
+    // 垂直匹配
+    for (int j = 0; j < GRID_SIZE; ++j) {
+        for (int i = 0; i < GRID_SIZE - 2; ++i) {
+            if (grid[i][j].getColor() == grid[i + 1][j].getColor() &&
+                grid[i][j].getColor() == grid[i + 2][j].getColor()) {
+                toRemove[i][j] = toRemove[i + 1][j] = toRemove[i + 2][j] = true;
+            }
+        }
+    }
+
+    return toRemove;
+}
+
+// 消除匹配方块
+void removeMatches() {
+    vector<vector<bool>> toRemove = findMatches();
+    vector<vector<bool>> specialEffects(GRID_SIZE, vector<bool>(GRID_SIZE, false));
+
+    // 标记匹配方块并处理特殊方块效果
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE; ++j) {
+            if (toRemove[i][j] && grid[i][j].getSpecialType() > 0) {
+                // 处理特殊方块效果
+                switch (grid[i][j].getSpecialType()) {
+                case 1: // 爆炸方块 - 消除周围8个方块
+                    for (int di = -1; di <= 1; di++) {
+                        for (int dj = -1; dj <= 1; dj++) {
+                            if (i + di >= 0 && i + di < GRID_SIZE &&
+                                j + dj >= 0 && j + dj < GRID_SIZE) {
+                                specialEffects[i + di][j + dj] = true;
+                            }
+                        }
+                    }
+                    break;
+                case 2: // 行消除
+                    for (int k = 0; k < GRID_SIZE; k++) {
+                        specialEffects[i][k] = true;
+                    }
+                    break;
+                case 3: // 列消除
+                    for (int k = 0; k < GRID_SIZE; k++) {
+                        specialEffects[k][j] = true;
+                    }
+                    break;
+                case 4: // 彩虹方块 - 消除所有同色方块
+                    for (int x = 0; x < GRID_SIZE; x++) {
+                        for (int y = 0; y < GRID_SIZE; y++) {
+                            if (grid[x][y].getColor() == grid[i][j].getColor()) {
+                                specialEffects[x][y] = true;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // 合并普通消除和特殊效果
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE; ++j) {
+            toRemove[i][j] = toRemove[i][j] || specialEffects[i][j];
+        }
+    }
+
+    int matches = 0;
+
+    // 标记匹配方块并创建粒子
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE; ++j) {
+            if (toRemove[i][j]) {
+                matches++;
+                createParticles(i, j, COLORS[grid[i][j].getColor()]);
+            }
+        }
+    }
+
+    if (matches == 0) {
+        comboCount = 0;
+        comboMultiplier = 1;
+
+        // 如果是无效交换，直接交换回来而不播放动画
+        if (isInvalidSwap) {
+            swap(grid[swapFromRow][swapFromCol], grid[swapToRow][swapToCol]);
+            isInvalidSwap = false;
+        }
+        return;
+    }
+
+    // 更新连击计数
+    comboCount++;
+    comboMultiplier = 1 + comboCount / 3;
+    if (comboMultiplier > MAX_COMBO) comboMultiplier = MAX_COMBO;
+
+    int pointsEarned = matches * 10 * comboMultiplier;
+    score += pointsEarned;
+
+    // 添加得分动画
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE; ++j) {
+            if (toRemove[i][j]) {
+                int x = j * CELL_SIZE + (WIDTH - GRID_SIZE * CELL_SIZE) / 2 + CELL_SIZE / 2;
+                int y = i * CELL_SIZE + MARGIN_TOP + CELL_SIZE / 2;
+                scorePopups.emplace_back(x, y, 10 * comboMultiplier, 30);
+            }
+        }
+    }
+
+    // 处理方块下落
+    for (int j = 0; j < GRID_SIZE; ++j) {
+        int emptyCells = 0;
+        for (int i = GRID_SIZE - 1; i >= 0; --i) {
+            if (toRemove[i][j]) {
+                emptyCells++;
+            }
+            else if (emptyCells > 0) {
+                grid[i + emptyCells][j] = grid[i][j];
+                grid[i][j].setColor(-1);
+            }
+        }
+
+        // 补充新方块
+        for (int i = 0; i < emptyCells; ++i) {
+            grid[i][j].setColor(rand() % levels[currentLevel - 1].getColorCount());
+            // 新方块不应该是特殊方块
+            grid[i][j].setSpecialType(0);
+        }
+    }
+
+    // 递归检查
+    if (hasMatches()) {
+        removeMatches();
+    }
+    else {
+        checkLevelCompletion();
+    }
+}
+
+// 处理游戏中的点击
+void handleClick(int x, int y) {
+    if (gameState == MENU) {
+        // 检查是否点击了开始游戏按钮
+        if (x >= WIDTH / 2 - 150 && x <= WIDTH / 2 + 150 &&
+            y >= HEIGHT / 2 - 25 && y <= HEIGHT / 2 + 25) {
+            currentLevel = 1;
+            startLevel(currentLevel);
+        }
+        // 检查是否点击了继续游戏按钮
+        else if (hasSavedGame && x >= WIDTH / 2 - 150 && x <= WIDTH / 2 + 150 &&
+            y >= HEIGHT / 2 + 40 && y <= HEIGHT / 2 + 90) {
+            loadGame();
+        }
+        // 检查是否点击了游戏教程按钮
+        else if (x >= WIDTH / 2 - 150 && x <= WIDTH / 2 + 150 &&
+            y >= HEIGHT / 2 + 105 && y <= HEIGHT / 2 + 155) {
+            gameState = TUTORIAL;
+        }
+        // 检查是否点击了退出游戏按钮
+        else if (x >= WIDTH / 2 - 150 && x <= WIDTH / 2 + 150 &&
+            y >= HEIGHT / 2 + 170 && y <= HEIGHT / 2 + 220) {
+            exit(0);
+        }
+    }
+    else if (gameState == TUTORIAL) {
+        // 检查是否点击了返回按钮
+        if (x >= WIDTH / 2 - 100 && x <= WIDTH / 2 + 100 &&
+            y >= HEIGHT - 120 && y <= HEIGHT - 70) {
+            gameState = MENU;
+        }
+    }
+    else if (gameState == PLAYING) {
+        // 检查是否点击了暂停按钮
+        if (x >= WIDTH - 100 && x <= WIDTH - 30 && y >= 30 && y <= 90) {
+            gameState = PAUSED;
+            return;
+        }
+
+        // 计算点击的网格坐标
+        int gridX = (x - (WIDTH - GRID_SIZE * CELL_SIZE) / 2) / CELL_SIZE;
+        int gridY = (y - MARGIN_TOP) / CELL_SIZE;
+
+        if (gridX >= 0 && gridX < GRID_SIZE && gridY >= 0 && gridY < GRID_SIZE && !isAnimating) {
+            if (!isSelecting) {
+                selectedRow = gridY;
+                selectedCol = gridX;
+                isSelecting = true;
+            }
+            else {
+                if (gridY == selectedRow && gridX == selectedCol) {
+                    isSelecting = false;
+                }
+                else if (isAdjacent(selectedRow, selectedCol, gridY, gridX) && !isAnimating) {
+                    // 先交换方块
+                    swap(grid[selectedRow][selectedCol], grid[gridY][gridX]);
+
+                    // 检查是否有匹配
+                    if (hasMatches()) {
+                        // 有匹配，播放交换动画
+                        swapBlocksWithAnimation(selectedRow, selectedCol, gridY, gridX);
+                        movesLeft--;
+                        if (movesLeft <= 0) {
+                            gameState = GAME_OVER;
+                        }
+                    }
+                    else {
+                        // 没有匹配，标记为无效交换
+                        isInvalidSwap = true;
+                        // 播放交换动画，动画结束后会在removeMatches中交换回来
+                        swapBlocksWithAnimation(selectedRow, selectedCol, gridY, gridX);
+                        movesLeft--; // 无效交换也消耗步数
+                        if (movesLeft <= 0) {
+                            gameState = GAME_OVER;
+                        }
+                    }
+                    isSelecting = false;
+                }
+                else {
+                    selectedRow = gridY;
+                    selectedCol = gridX;
+                }
+            }
+        }
+    }
+    else if (gameState == PAUSED) {
+        // 检查是否点击了继续游戏按钮
+        if (x >= WIDTH / 2 - 100 && x <= WIDTH / 2 + 100 &&
+            y >= HEIGHT / 2 - 20 && y <= HEIGHT / 2 + 30) {
+            gameState = PLAYING;
+        }
+        // 检查是否点击了返回主菜单按钮
+        else if (x >= WIDTH / 2 - 100 && x <= WIDTH / 2 + 100 &&
+            y >= HEIGHT / 2 + 60 && y <= HEIGHT / 2 + 110) {
+            gameState = MENU;
+        }
+    }
+    else if (gameState == GAME_OVER || gameState == LEVEL_COMPLETE) {
+        // 任意点击返回主菜单
+        gameState = MENU;
+    }
+}
+
+// 处理菜单输入
+void handleMenuInput(int key) {
+    if (key == 'Q' || key == 'q') {
+        exit(0);
+    }
+}
+
+// 开始新关卡
+void startLevel(int level) {
+    gameState = PLAYING;
+    score = 0;
+    movesLeft = levels[level - 1].getInitialMoves();
+    comboCount = 0;
+    comboMultiplier = 1;
+    isSelecting = false;
+    isAnimating = false;
+    isInvalidSwap = false;
+    particles.clear();
+    scorePopups.clear();
+    initGrid();
+}
+
+// 检查关卡完成条件
+void checkLevelCompletion() {
+    if (score >= levels[currentLevel - 1].getTargetScore()) {
+        if (currentLevel < MAX_LEVEL) {
+            gameState = LEVEL_COMPLETE;
+        }
+        else {
+            gameState = GAME_OVER;
+        }
+    }
+}
+
+// 绘制暂停菜单
+void drawPauseMenu() {
+    drawGradientBackground();
+
+    settextcolor(WHITE);
+    settextstyle(60, 0, _T("微软雅黑"));
+    setbkmode(TRANSPARENT);
+    outtextxy(WIDTH / 2 - 100, HEIGHT / 3, _T("游戏暂停"));
+
+    settextstyle(36, 0, _T("微软雅黑"));
+
+    // 继续游戏按钮
+    setfillcolor(RGB(100, 100, 200));
+    fillroundrect(WIDTH / 2 - 100, HEIGHT / 2 - 20, WIDTH / 2 + 100, HEIGHT / 2 + 30, 15, 15);
+    outtextxy(WIDTH / 2 - 55, HEIGHT / 2 - 10, _T("继续游戏"));
+
+    // 返回主菜单按钮
+    setfillcolor(RGB(200, 100, 100));
+    fillroundrect(WIDTH / 2 - 100, HEIGHT / 2 + 60, WIDTH / 2 + 100, HEIGHT / 2 + 110, 15, 15);
+    outtextxy(WIDTH / 2 - 75, HEIGHT / 2 + 70, _T("返回主菜单"));
+
+    settextstyle(24, 0, _T("微软雅黑"));
+    outtextxy(WIDTH / 2 - 100, HEIGHT - 120, _T("点击按钮选择"));
+    setbkmode(OPAQUE);
+}
+
+// 绘制关卡完成界面（修改：使用渐变背景）
+void drawLevelComplete() {
+    // 绘制与主菜单一致的渐变背景
+    drawGradientBackground();
+
+    settextcolor(RGB(255, 255, 0));
+    settextstyle(60, 0, _T("微软雅黑"));
+    setbkmode(TRANSPARENT);
+    outtextxy(WIDTH / 2 - 150, HEIGHT / 3, _T("关卡完成!"));
+
+    settextstyle(48, 0, _T("微软雅黑"));
+    TCHAR levelStr[50];
+    _stprintf_s(levelStr, _T("第 %d 关"), currentLevel);
+    outtextxy(WIDTH / 2 - 80, HEIGHT / 2, levelStr);
+
+    settextstyle(32, 0, _T("微软雅黑"));
+    outtextxy(WIDTH / 2 - 150, HEIGHT - 120, _T("按任意键继续下一关"));
+    setbkmode(OPAQUE);
+}
+
+// 绘制游戏界面
+void drawGame() {
+    setbkcolor(RGB(240, 240, 240));
+
+    // 绘制标题和分数
+    settextcolor(BLACK);
+    settextstyle(48, 0, _T("微软雅黑"));
+    setbkmode(TRANSPARENT);
+    outtextxy(30, 30, _T("开心消消乐"));
+
+    settextstyle(24, 0, _T("微软雅黑"));
+    TCHAR scoreStr[30], movesStr[30], levelStr[30], comboStr[30];
+    _stprintf_s(scoreStr, _T("得分: %d/%d"), score, levels[currentLevel - 1].getTargetScore());
+    _stprintf_s(movesStr, _T("步数: %d"), movesLeft);
+    _stprintf_s(levelStr, _T("关卡: %d/%d"), currentLevel, MAX_LEVEL);
+    _stprintf_s(comboStr, _T("连击: %dx"), comboMultiplier);
+
+    outtextxy(WIDTH - 220, 40, scoreStr);
+    outtextxy(WIDTH - 220, 80, movesStr);
+    outtextxy(WIDTH - 220, 120, levelStr);
+
+    if (comboMultiplier > 1) {
+        settextcolor(RGB(255, 0, 0));
+        outtextxy(WIDTH - 220, 160, comboStr);
+        settextcolor(BLACK);
+    }
+    setbkmode(OPAQUE);
+
+    // 绘制网格
+    for (int i = 0; i < GRID_SIZE; ++i) {
+        for (int j = 0; j < GRID_SIZE; ++j) {
+            int x = j * CELL_SIZE + (WIDTH - GRID_SIZE * CELL_SIZE) / 2;
+            int y = i * CELL_SIZE + MARGIN_TOP;
+
+            // 动画效果
+            if (isAnimating && ((i == swapFromRow && j == swapFromCol) ||
+                (i == swapToRow && j == swapToCol))) {
+                int fromX = swapFromCol * CELL_SIZE + (WIDTH - GRID_SIZE * CELL_SIZE) / 2;
+                int fromY = swapFromRow * CELL_SIZE + MARGIN_TOP;
+                int toX = swapToCol * CELL_SIZE + (WIDTH - GRID_SIZE * CELL_SIZE) / 2;
+                int toY = swapToRow * CELL_SIZE + MARGIN_TOP;
+
+                if (i == swapFromRow && j == swapFromCol) {
+                    x = fromX + (toX - fromX) * animationStep / ANIMATION_STEPS;
+                    y = fromY + (toY - fromY) * animationStep / ANIMATION_STEPS;
+                }
+                else {
+                    x = toX + (fromX - toX) * animationStep / ANIMATION_STEPS;
+                    y = toY + (fromY - toY) * animationStep / ANIMATION_STEPS;
+                }
+            }
+
+            // 绘制方块
+            drawBlock(x, y, grid[i][j]);
+
+            // 选中效果
+            if (isSelecting && i == selectedRow && j == selectedCol && !isAnimating) {
+                setlinecolor(WHITE);
+                setlinestyle(PS_SOLID, 3);
+                rectangle(x + 2, y + 2, x + CELL_SIZE - 2, y + CELL_SIZE - 2);
+                setlinestyle(PS_SOLID, 1);
+            }
+        }
+    }
+
+    // 绘制粒子效果和得分动画
+    drawParticles();
+    drawScorePopups();
+
+    // 暂停按钮
+    setfillcolor(RGB(200, 200, 200));
+    solidroundrect(WIDTH - 100, 30, WIDTH - 30, 90, 10, 10);
+    settextcolor(BLACK);
+    settextstyle(24, 0, _T("微软雅黑"));
+    setbkmode(TRANSPARENT);
+    outtextxy(WIDTH - 85, 50, _T("暂停"));
+    setbkmode(OPAQUE);
+
+    // 游戏结束界面
+    if (gameState == GAME_OVER) {
+        // 绘制与主菜单一致的渐变背景
+        drawGradientBackground();
+
+        settextstyle(60, 0, _T("微软雅黑"));
+        settextcolor(RED);
+        setbkmode(TRANSPARENT);
+        outtextxy(WIDTH / 2 - 120, HEIGHT / 2 - 40, _T("游戏结束"));
+
+        settextstyle(32, 0, _T("微软雅黑"));
+        TCHAR finalScore[30];
+        _stprintf_s(finalScore, _T("最终得分: %d"), score);
+        outtextxy(WIDTH / 2 - 100, HEIGHT / 2 + 40, finalScore);
+        outtextxy(WIDTH / 2 - 150, HEIGHT / 2 + 90, _T("按任意键返回主菜单"));
+        setbkmode(OPAQUE);
+    }
+}
+
+int main() {
+    // 检查是否有存档
+    ifstream in("savedata.dat", ios::binary);
+    hasSavedGame = in.good();
+    in.close();
+
+    initgraph(WIDTH, HEIGHT);
+    setbkcolor(WHITE);
+    cleardevice();
+    BeginBatchDraw(); // 开启双缓冲
+
+    playBackgroundMusic();
+
+    while (true) {
+        // 更新粒子效果和得分动画
+        updateParticles();
+        updateScorePopups();
+
+        // 处理动画
+        if (isAnimating && gameState == PLAYING) {
+            animationStep++;
+            if (animationStep >= ANIMATION_STEPS) {
+                isAnimating = false;
+                // 动画完成后检查是否有匹配
+                removeMatches();
+            }
+        }
+
+        // 处理输入
+        ExMessage msg;
+        while (peekmessage(&msg, EM_MOUSE | EM_KEY)) {
+            if (msg.message == WM_LBUTTONDOWN) {
+                handleClick(msg.x, msg.y);
+            }
+            else if (msg.message == WM_KEYDOWN) {
+                switch (gameState) {
+                case MENU:
+                    handleMenuInput(msg.vkcode);
+                    break;
+                case GAME_OVER:
+                case LEVEL_COMPLETE:
+                    if (msg.vkcode) {
+                        if (gameState == GAME_OVER) {
+                            gameState = MENU;
+                        }
+                        else {
+                            currentLevel++;
+                            startLevel(currentLevel);
+                        }
+                    }
+                    break;
+                case PLAYING:
+                    if (msg.vkcode == VK_ESCAPE) {
+                        gameState = PAUSED;
+                    }
+                    break;
+                case PAUSED:
+                    if (msg.vkcode == VK_ESCAPE) {
+                        gameState = PLAYING;
+                    }
+                    break;
+                case TUTORIAL:
+                    if (msg.vkcode == VK_ESCAPE) {
+                        gameState = MENU;
+                    }
+                    break;
+                }
+            }
+        }
+
+        // 清除屏幕
+        cleardevice();
+
+        // 绘制当前状态
+        switch (gameState) {
+        case MENU:
+            drawMenu();
+            break;
+        case PLAYING:
+            drawGame();
+            break;
+        case PAUSED:
+            drawGame();
+            drawPauseMenu();
+            break;
+        case GAME_OVER:
+            drawGame();
+            break;
+        case LEVEL_COMPLETE:
+            drawGame();
+            drawLevelComplete();
+            break;
+        case TUTORIAL:
+            drawTutorial(); // 直接绘制教程界面（已包含渐变背景）
+            break;
+        }
+
+        FlushBatchDraw(); // 刷新缓冲区
+        Sleep(16); // 约60FPS
+    }
+    stopBackgroundMusic();
+
+    EndBatchDraw(); // 结束双缓冲
+    closegraph();
+    return 0;
+}
